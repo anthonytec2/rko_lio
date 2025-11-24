@@ -357,23 +357,12 @@ void Node::registration_loop() {
               *msg_y = static_cast<float>(p.y());
               *msg_z = static_cast<float>(p.z());
             }
-
-            // Overwrite the timestamp field, if present and of type FLOAT64, with the processed absolute timestamps.
-            const auto& ts = time_vector;
-            if (ts.size() == point_count) {
-              const auto ts_field_it =
-                  std::find_if(deskewed_msg.fields.cbegin(), deskewed_msg.fields.cend(), [](const auto& field) {
-                    return field.name == "time" || field.name == "timestamp" || field.name == "timestamps" ||
-                           field.name == "t" || field.name == "stamps";
-                  });
-              if (ts_field_it != deskewed_msg.fields.cend() &&
-                  ts_field_it->datatype == sensor_msgs::msg::PointField::FLOAT64) {
-                sensor_msgs::PointCloud2Iterator<double> msg_time(deskewed_msg, ts_field_it->name);
-                for (size_t i = 0; i < point_count; ++i, ++msg_time) {
-                  *msg_time = ts[i].count();
-                }
-              }
+            const double ref_time = end_stamp.count(); // or header stamp, or mid-scan
+            sensor_msgs::PointCloud2Iterator<double> msg_time(deskewed_msg, "time");
+            for (size_t i = 0; i < point_count; ++i, ++msg_time) {
+              *msg_time = ref_time;
             }
+
           } else {
             RCLCPP_WARN_STREAM(
                 node->get_logger(),
