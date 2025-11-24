@@ -96,6 +96,7 @@ public:
   std::atomic<bool> atomic_can_process = false;
   std::queue<core::ImuControl> imu_buffer;
   std::queue<core::LidarFrame> lidar_buffer;
+  std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> lidar_msg_buffer;
   size_t max_lidar_buffer_size = 50;
 
   Node() = delete;

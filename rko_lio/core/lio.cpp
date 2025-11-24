@@ -371,6 +371,8 @@ Vector3dVector LIO::register_scan(const Vector3dVector& scan, const TimestampVec
     lidar_state.time = current_lidar_time;
     std::cout << "First LiDAR received, using pose at this time as the global frame.\n";
     const auto& preproc_result = preprocess_scan(scan, config);
+    // No deskewing is performed for the very first frame; keep the original scan as the "deskewed" one.
+    last_deskewed_scan = scan;
     if (!config.initialization_phase) {
       // use the first frame for the map only if we're not initializing
       map.Update(preproc_result.map_update_frame(), lidar_state.pose);
@@ -413,6 +415,19 @@ Vector3dVector LIO::register_scan(const Vector3dVector& scan, const TimestampVec
     tau.tail<3>() = avg_ang_vel * dt;
     return Sophus::SE3d::exp(tau);
   };
+
+  // Build a full-resolution deskewed scan (in the base frame) for external consumers, e.g. ROS wrappers.
+  if (config.deskew) {
+    const Sophus::SE3d scan_to_scan_motion_inverse = relative_pose_at_time(current_lidar_time).inverse();
+    last_deskewed_scan.resize(scan.size());
+    std::transform(scan.cbegin(), scan.cend(), timestamps.cbegin(), last_deskewed_scan.begin(),
+                   [&](const Eigen::Vector3d& point, Secondsd timestamp) {
+                     const auto pose = scan_to_scan_motion_inverse * relative_pose_at_time(timestamp);
+                     return pose * point;
+                   });
+  } else {
+    last_deskewed_scan = scan;
+  }
 
   const Sophus::SE3d initial_guess = lidar_state.pose * relative_pose_at_time(current_lidar_time);
 

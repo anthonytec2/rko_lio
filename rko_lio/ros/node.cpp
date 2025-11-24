@@ -31,6 +31,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <rclcpp/serialization.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <stdexcept>
 
 namespace {
@@ -286,6 +287,7 @@ void Node::lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& l
     {
       std::lock_guard lock(buffer_mutex);
       lidar_buffer.emplace(timestamps, scan);
+      lidar_msg_buffer.emplace(lidar_msg);
       atomic_can_process = !imu_buffer.empty() && imu_buffer.back().time > lidar_buffer.front().timestamps.max;
     }
     if (atomic_can_process) {
@@ -306,7 +308,9 @@ void Node::registration_loop() {
       break;
     }
     core::LidarFrame frame = std::move(lidar_buffer.front());
+    const auto lidar_msg = lidar_msg_buffer.front();
     lidar_buffer.pop();
+    lidar_msg_buffer.pop();
     const auto& [timestamps, scan] = frame;
     const auto& [start_stamp, end_stamp, time_vector] = timestamps;
     for (; !imu_buffer.empty() && imu_buffer.front().time < end_stamp; imu_buffer.pop()) {
@@ -331,10 +335,53 @@ void Node::registration_loop() {
       if (!deskewed_frame.empty()) {
         // TODO: first frame is skipped and an empty frame is returned. improve how we handle this
         if (publish_deskewed_scan) {
-          std_msgs::msg::Header header;
-          header.frame_id = lidar_frame;
-          header.stamp = rclcpp::Time(std::chrono::duration_cast<std::chrono::nanoseconds>(end_stamp).count());
-          frame_publisher->publish(utils::eigen_to_point_cloud2(deskewed_frame, header));
+          // Build a full-resolution deskewed cloud that preserves the original per-point channels.
+          sensor_msgs::msg::PointCloud2 deskewed_msg = *lidar_msg;
+
+          const size_t point_count = static_cast<size_t>(deskewed_msg.height) * static_cast<size_t>(deskewed_msg.width);
+
+          if (lio->last_deskewed_scan.size() == point_count) {
+            // Transform from base frame (used internally by LIO) back to the lidar frame.
+            const Sophus::SE3d base_to_lidar = extrinsic_lidar2base.inverse();
+            std::vector<Eigen::Vector3d> deskewed_points_lidar(point_count);
+            std::transform(lio->last_deskewed_scan.cbegin(), lio->last_deskewed_scan.cend(),
+                           deskewed_points_lidar.begin(),
+                           [&](const Eigen::Vector3d& p_base) { return base_to_lidar * p_base; });
+
+            sensor_msgs::PointCloud2Iterator<float> msg_x(deskewed_msg, "x");
+            sensor_msgs::PointCloud2Iterator<float> msg_y(deskewed_msg, "y");
+            sensor_msgs::PointCloud2Iterator<float> msg_z(deskewed_msg, "z");
+            for (size_t i = 0; i < point_count; ++i, ++msg_x, ++msg_y, ++msg_z) {
+              const Eigen::Vector3d& p = deskewed_points_lidar[i];
+              *msg_x = static_cast<float>(p.x());
+              *msg_y = static_cast<float>(p.y());
+              *msg_z = static_cast<float>(p.z());
+            }
+
+            // Overwrite the timestamp field, if present and of type FLOAT64, with the processed absolute timestamps.
+            const auto& ts = time_vector;
+            if (ts.size() == point_count) {
+              const auto ts_field_it =
+                  std::find_if(deskewed_msg.fields.cbegin(), deskewed_msg.fields.cend(), [](const auto& field) {
+                    return field.name == "time" || field.name == "timestamp" || field.name == "timestamps" ||
+                           field.name == "t" || field.name == "stamps";
+                  });
+              if (ts_field_it != deskewed_msg.fields.cend() &&
+                  ts_field_it->datatype == sensor_msgs::msg::PointField::FLOAT64) {
+                sensor_msgs::PointCloud2Iterator<double> msg_time(deskewed_msg, ts_field_it->name);
+                for (size_t i = 0; i < point_count; ++i, ++msg_time) {
+                  *msg_time = ts[i].count();
+                }
+              }
+            }
+          } else {
+            RCLCPP_WARN_STREAM(
+                node->get_logger(),
+                "Size mismatch between last_deskewed_scan and incoming cloud. Publishing original cloud without "
+                "deskewed XYZ/time channels.");
+          }
+
+          frame_publisher->publish(deskewed_msg);
         }
         publish_odometry(lio->lidar_state, end_stamp);
         if (publish_lidar_acceleration) {

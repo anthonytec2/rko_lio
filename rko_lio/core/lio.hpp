@@ -160,6 +160,14 @@ public:
   /** IMU measurement statistics since last LiDAR frame. */
   IntervalStats interval_stats;
 
+  /** Deskewed full-resolution LiDAR scan from the last registration, expressed in the base frame.
+   *  This has the same number of points as the input scan passed to register_scan (before range
+   *  clipping and voxel downsampling). It is primarily intended for ROS wrappers to export a
+   *  full-resolution deskewed point cloud while the core continues to operate on the filtered
+   *  representation.
+   */
+  Vector3dVector last_deskewed_scan;
+
   explicit LIO(const Config& config_)
       : config(config_), map(config_.voxel_size, config_.max_range, config_.max_points_per_voxel) {}
 
