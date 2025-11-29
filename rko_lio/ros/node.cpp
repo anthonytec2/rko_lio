@@ -27,6 +27,7 @@
 #include "rko_lio/core/profiler.hpp"
 #include "rko_lio/ros/utils/utils.hpp"
 // other
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -335,42 +336,88 @@ void Node::registration_loop() {
       if (!deskewed_frame.empty()) {
         // TODO: first frame is skipped and an empty frame is returned. improve how we handle this
         if (publish_deskewed_scan) {
-          // Build a full-resolution deskewed cloud that preserves the original per-point channels.
-          sensor_msgs::msg::PointCloud2 deskewed_msg = *lidar_msg;
-
-          const size_t point_count = static_cast<size_t>(deskewed_msg.height) * static_cast<size_t>(deskewed_msg.width);
+          const size_t point_count = static_cast<size_t>(lidar_msg->height) * static_cast<size_t>(lidar_msg->width);
 
           if (lio->last_deskewed_scan.size() == point_count) {
-            // Transform from base frame (used internally by LIO) back to the lidar frame.
             const Sophus::SE3d base_to_lidar = extrinsic_lidar2base.inverse();
-            std::vector<Eigen::Vector3d> deskewed_points_lidar(point_count);
-            std::transform(lio->last_deskewed_scan.cbegin(), lio->last_deskewed_scan.cend(),
-                           deskewed_points_lidar.begin(),
-                           [&](const Eigen::Vector3d& p_base) { return base_to_lidar * p_base; });
+            sensor_msgs::msg::PointCloud2 deskewed_msg;
+            deskewed_msg.header.frame_id =
+                lidar_msg->header.frame_id.empty() ? lidar_frame : lidar_msg->header.frame_id;
+            deskewed_msg.header.stamp =
+                rclcpp::Time(std::chrono::duration_cast<std::chrono::nanoseconds>(end_stamp).count());
+            deskewed_msg.height = lidar_msg->height;
+            deskewed_msg.width = lidar_msg->width;
+            deskewed_msg.is_bigendian = lidar_msg->is_bigendian;
+            deskewed_msg.is_dense = lidar_msg->is_dense;
+
+            sensor_msgs::PointCloud2Modifier modifier(deskewed_msg);
+            modifier.setPointCloud2Fields(
+                6, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1, sensor_msgs::msg::PointField::FLOAT32, "z", 1,
+                sensor_msgs::msg::PointField::FLOAT32, "reflectivity", 1, sensor_msgs::msg::PointField::FLOAT32,
+                "signal", 1, sensor_msgs::msg::PointField::FLOAT32, "near_ir", 1,
+                sensor_msgs::msg::PointField::FLOAT32);
+            modifier.resize(point_count);
+
+            const auto make_input_iter =
+                [&](const std::string& field_name) -> std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<float>> {
+              const bool has_field = std::any_of(lidar_msg->fields.cbegin(), lidar_msg->fields.cend(),
+                                                 [&](const auto& field) { return field.name == field_name; });
+              if (has_field) {
+                return std::make_unique<sensor_msgs::PointCloud2ConstIterator<float>>(*lidar_msg, field_name);
+              }
+              RCLCPP_WARN_STREAM_ONCE(node->get_logger(), "Input cloud missing channel '"
+                                                              << field_name << "'. Filling zeros in deskewed cloud.");
+              return nullptr;
+            };
+
+            auto reflectivity_in = make_input_iter("reflectivity");
+            auto signal_in = make_input_iter("signal");
+            auto near_ir_in = make_input_iter("near_ir");
 
             sensor_msgs::PointCloud2Iterator<float> msg_x(deskewed_msg, "x");
             sensor_msgs::PointCloud2Iterator<float> msg_y(deskewed_msg, "y");
             sensor_msgs::PointCloud2Iterator<float> msg_z(deskewed_msg, "z");
-            for (size_t i = 0; i < point_count; ++i, ++msg_x, ++msg_y, ++msg_z) {
-              const Eigen::Vector3d& p = deskewed_points_lidar[i];
-              *msg_x = static_cast<float>(p.x());
-              *msg_y = static_cast<float>(p.y());
-              *msg_z = static_cast<float>(p.z());
-            }
-            const double ref_time = end_stamp.count(); // or header stamp, or mid-scan
-            sensor_msgs::PointCloud2Iterator<double> msg_time(deskewed_msg, "time");
-            for (size_t i = 0; i < point_count; ++i, ++msg_time) {
-              *msg_time = ref_time;
+            sensor_msgs::PointCloud2Iterator<float> msg_reflectivity(deskewed_msg, "reflectivity");
+            sensor_msgs::PointCloud2Iterator<float> msg_signal(deskewed_msg, "signal");
+            sensor_msgs::PointCloud2Iterator<float> msg_near_ir(deskewed_msg, "near_ir");
+
+            for (size_t i = 0; i < point_count;
+                 ++i, ++msg_x, ++msg_y, ++msg_z, ++msg_reflectivity, ++msg_signal, ++msg_near_ir) {
+              const Eigen::Vector3d p_lidar = base_to_lidar * lio->last_deskewed_scan[i];
+              *msg_x = static_cast<float>(p_lidar.x());
+              *msg_y = static_cast<float>(p_lidar.y());
+              *msg_z = static_cast<float>(p_lidar.z());
+
+              if (reflectivity_in) {
+                *msg_reflectivity = **reflectivity_in;
+                ++(*reflectivity_in);
+              } else {
+                *msg_reflectivity = 0.F;
+              }
+
+              if (signal_in) {
+                *msg_signal = **signal_in;
+                ++(*signal_in);
+              } else {
+                *msg_signal = 0.F;
+              }
+
+              if (near_ir_in) {
+                *msg_near_ir = **near_ir_in;
+                ++(*near_ir_in);
+              } else {
+                *msg_near_ir = 0.F;
+              }
             }
 
+            frame_publisher->publish(deskewed_msg);
           } else {
             RCLCPP_WARN_STREAM(
                 node->get_logger(),
                 "Size mismatch between last_deskewed_scan and incoming cloud. Publishing original cloud without "
-                "deskewed XYZ/time channels.");
+                "deskewed XYZ channels.");
+            frame_publisher->publish(*lidar_msg);
           }
-
-          frame_publisher->publish(deskewed_msg);
         }
         publish_odometry(lio->lidar_state, end_stamp);
         if (publish_lidar_acceleration) {
