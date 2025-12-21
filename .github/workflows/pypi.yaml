@@ -4,8 +4,6 @@ on:
     types: [published]
   push:
     branches: ["master"]
-  pull_request:
-    branches: ["master"]
 jobs:
   cibuildwheel:
     name: Build py wheels on ${{ matrix.os }}
@@ -16,17 +14,17 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-15]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Build test wheels (only PRs)
         if: github.event_name != 'release'
-        uses: pypa/cibuildwheel@v3.2.1
+        uses: pypa/cibuildwheel@v3.3.0
         env: # build 1 build per platform just to make sure we can do it later when releasing
           CIBW_BUILD: "cp312-*"
         with:
           package-dir: ${{github.workspace}}/
       - name: Build all wheels (release)
         if: github.event_name == 'release'
-        uses: pypa/cibuildwheel@v3.2.1
+        uses: pypa/cibuildwheel@v3.3.0
         with:
           package-dir: ${{github.workspace}}/
       - uses: actions/upload-artifact@v5
