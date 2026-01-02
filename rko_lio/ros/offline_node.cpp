@@ -25,7 +25,12 @@
 #include "node.hpp"
 #include "rko_lio/core/profiler.hpp"
 #include "rko_lio/ros/utils/rosbag.hpp"
+#include "rko_lio/ros/utils/utils.hpp"
 // other
+#include <mutex>
+#include <queue>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 
 namespace {
@@ -67,20 +72,73 @@ public:
   std::unique_ptr<utils::BufferableBag> bag;
 
   BagProgressPublisher::SharedPtr bag_progress_publisher;
+  rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr gps_publisher;
+  bool publish_clock = false;
+  size_t clock_publish_count = 0;
 
   float total_bag_msgs = 0;
   float processed_bag_msgs = 0;
+  std::string gps_topic = "/rko_lio/gps_fix";
+
+  // GPS message buffer to synchronize with odometry timestamps
+  struct BufferedGPSMessage {
+    sensor_msgs::msg::NavSatFix msg;
+    core::Secondsd timestamp;
+  };
+  std::queue<BufferedGPSMessage> gps_buffer;
+  std::mutex gps_buffer_mutex;
+
+  // Publish GPS messages that are close to the current odometry timestamp
+  // Preserves original GPS timestamps, only changes publish order for synchronization
+  void publish_synchronized_gps(const core::Secondsd& current_stamp) {
+    constexpr double gps_sync_tolerance = 0.5; // 500ms tolerance
+    std::lock_guard<std::mutex> lock(gps_buffer_mutex);
+    while (!gps_buffer.empty()) {
+      const auto& buffered = gps_buffer.front();
+      const double time_diff = std::chrono::abs(current_stamp - buffered.timestamp).count();
+
+      // If GPS timestamp is close to current odometry timestamp, publish it
+      // Keep original GPS timestamp - only change publish order
+      if (time_diff <= gps_sync_tolerance) {
+        gps_publisher->publish(buffered.msg);
+        gps_buffer.pop();
+      } else if (buffered.timestamp > current_stamp) {
+        // GPS message is in the future, wait for odometry to catch up
+        break;
+      } else {
+        // GPS message is too old, skip it
+        gps_buffer.pop();
+      }
+    }
+  }
 
   explicit OfflineNode(const rclcpp::NodeOptions& options) : Node("rko_lio_offline_node", options) {
     // increase the lidar buffer limit because we're offline
     max_lidar_buffer_size = 100;
-    // bag reading
+    // bag reading - include GPS topic to republish it
     const tf2::Duration skip_to_time = tf2::durationFromSec(node->declare_parameter<double>("skip_to_time", 0.0));
+    gps_topic = node->declare_parameter<std::string>("gps_topic", gps_topic);
+    std::vector<std::string> bag_topics = {imu_topic, lidar_topic, gps_topic};
     bag = std::make_unique<utils::BufferableBag>(node->declare_parameter<std::string>("bag_path"),
-                                                 std::make_shared<utils::BufferableBag::TFBridge>(node),
-                                                 std::vector<std::string>{imu_topic, lidar_topic}, skip_to_time);
+                                                 std::make_shared<utils::BufferableBag::TFBridge>(node), bag_topics,
+                                                 skip_to_time);
     total_bag_msgs = bag->message_count();
     bag_progress_publisher = node->create_publisher<std_msgs::msg::Float32MultiArray>("/rko_lio/bag_progress", 10);
+
+    // GPS publisher to republish GPS messages from the bag
+    const rclcpp::QoS publisher_qos((rclcpp::SystemDefaultsQoS().keep_last(1).durability_volatile()));
+    gps_publisher = node->create_publisher<sensor_msgs::msg::NavSatFix>(gps_topic, publisher_qos);
+
+    // Clock publishing for sim time support (enables --use-sim-time on bag recorders)
+    // Clock will be published when frame/odometry messages are published to ensure synchronization
+    publish_clock = node->declare_parameter<bool>("publish_clock", false);
+    RCLCPP_INFO(node->get_logger(), "publish_clock parameter: %s", publish_clock ? "true" : "false");
+    if (publish_clock) {
+      clock_publisher = node->create_publisher<rosgraph_msgs::msg::Clock>("/clock", 10);
+      RCLCPP_INFO(node->get_logger(), "Clock publishing enabled on /clock (synchronized with output messages)");
+    } else {
+      RCLCPP_WARN(node->get_logger(), "Clock publishing is DISABLED. Set publish_clock:=true to enable.");
+    }
   }
 
   void run() {
@@ -104,13 +162,25 @@ public:
       if (topic_name == imu_topic) {
         const auto& imu_msg = deserialize_next_msg<sensor_msgs::msg::Imu>(serialized_msg);
         imu_callback(imu_msg);
+        // Note: Clock is now published when frame/odometry messages are published
+        // to ensure synchronization with output message timestamps
       } else if (topic_name == lidar_topic) {
         const auto& lidar_msg = deserialize_next_msg<sensor_msgs::msg::PointCloud2>(serialized_msg);
         lidar_callback(lidar_msg);
+        // Note: Clock is now published when frame/odometry messages are published
+        // to ensure synchronization with output message timestamps
+      } else if (topic_name == gps_topic) {
+        // Buffer GPS messages to synchronize with odometry timestamps
+        const auto& gps_msg = deserialize_next_msg<sensor_msgs::msg::NavSatFix>(serialized_msg);
+        const auto gps_stamp = utils::ros_time_to_seconds(gps_msg->header.stamp);
+        std::lock_guard<std::mutex> lock(gps_buffer_mutex);
+        gps_buffer.push({*gps_msg, gps_stamp});
       }
 
       processed_bag_msgs++;
       publish_bag_progress(bag_progress_publisher, processed_bag_msgs, total_bag_msgs);
+      // Spin to ensure publishers send messages
+      rclcpp::spin_some(node);
     }
     while (rclcpp::ok()) {
       {
@@ -122,6 +192,18 @@ public:
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    if (publish_clock) {
+      RCLCPP_INFO(node->get_logger(), "Clock publishing was enabled (published with output messages)");
+    }
+  }
+
+  // Override publish_odometry to also publish synchronized GPS messages
+  void publish_odometry(const core::State& state, const core::Secondsd& stamp) const override {
+    // Call base class implementation
+    Node::publish_odometry(state, stamp);
+    // Publish GPS messages synchronized with this odometry timestamp
+    const_cast<OfflineNode*>(this)->publish_synchronized_gps(stamp);
   }
 };
 } // namespace rko_lio::ros

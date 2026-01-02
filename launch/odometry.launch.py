@@ -47,9 +47,21 @@ offline_only_parameters = [
         "type": "float",
         "description": "[Offline node only] Skip to timestamp in the bag (seconds)",
     },
+    {
+        "name": "publish_clock",
+        "default": "false",
+        "type": "bool",
+        "description": "[Offline node only] Publish /clock topic based on IMU timestamps. Enables --use-sim-time on bag recorders.",
+    },
 ]
 
 configurable_parameters = [
+    {
+        "name": "use_sim_time",
+        "default": "false",
+        "type": "bool",
+        "description": "Use ROS simulated time (/clock) for all nodes.",
+    },
     {
         "name": "imu_topic",
         "default": "",
@@ -303,15 +315,47 @@ def auto_cast_params(params, param_defs):
 
 
 def get_configured_cli_parameters(configurable_parameters, context):
-    "Return only CLI parameters that were explicitly set by the user"
+    """
+    Return CLI parameters and launch_arguments that were explicitly set.
+    This includes both direct CLI := arguments and launch_arguments from IncludeLaunchDescription.
+    """
+    # Get explicit CLI arguments
     explicit_params = {
         arg.split(":=")[0] for arg in getattr(context, "argv", []) if ":=" in arg
     }
     cli_params = {}
     for param in configurable_parameters:
         name = param["name"]
+        # Check if set via CLI :=
         if name in explicit_params:
             cli_params[name] = LaunchConfiguration(name).perform(context)
+        else:
+            # Also check LaunchConfiguration (from launch_arguments in IncludeLaunchDescription)
+            # Try to read it - if it exists and is not the default, include it
+            try:
+                launch_config = LaunchConfiguration(name)
+                launch_config_value = launch_config.perform(context)
+                default_value = param.get("default", "")
+                
+                # Skip if value is empty or None
+                if launch_config_value in ("", None):
+                    continue
+                
+                # For bool parameters, compare as strings first, then convert
+                if param.get("type") == "bool":
+                    # Convert both to bool for comparison
+                    default_bool = str(default_value).lower() == "true"
+                    value_bool = str(launch_config_value).lower() == "true"
+                    if value_bool != default_bool:
+                        cli_params[name] = launch_config_value
+                else:
+                    # For other types, include if different from default
+                    if launch_config_value != default_value:
+                        cli_params[name] = launch_config_value
+            except Exception as e:
+                # Parameter might not be available or not set, skip it
+                # This is expected for parameters not passed via launch_arguments
+                pass
     return auto_cast_params(cli_params, configurable_parameters)
 
 
@@ -449,6 +493,16 @@ def launch_setup(context, *args, **kwargs):
     # Prepare parameters
     cli_params = get_configured_cli_parameters(configurable_parameters, context=context)
     params_from_file = get_config_file_parameters(context)
+    
+    # Ensure publish_clock from launch_arguments is captured
+    if "publish_clock" not in cli_params:
+        try:
+            publish_clock_val = LaunchConfiguration("publish_clock").perform(context)
+            if publish_clock_val:
+                cli_params["publish_clock"] = str(publish_clock_val).lower() == "true"
+        except Exception:
+            pass
+    
     final_params = merge_and_validate_parameters(
         cli_params=cli_params,
         file_params=params_from_file,
@@ -491,6 +545,7 @@ def launch_setup(context, *args, **kwargs):
                 executable="rviz2",
                 name="rviz2",
                 arguments=["-d", rviz_config_file.as_posix()],
+                parameters=[{"use_sim_time": final_params.get("use_sim_time", False)}],
                 output="screen",
             )
         )

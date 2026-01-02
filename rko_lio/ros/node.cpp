@@ -32,6 +32,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <rclcpp/serialization.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <stdexcept>
 
@@ -411,6 +412,7 @@ void Node::registration_loop() {
             frame_publisher->publish(*lidar_msg);
           }
         }
+        // Publish odometry (which also publishes clock if enabled)
         publish_odometry(lio->lidar_state, end_stamp);
         if (publish_lidar_acceleration) {
           publish_lidar_accel(lio->lidar_state.linear_acceleration, end_stamp);
@@ -442,12 +444,24 @@ void Node::publish_odometry(const core::State& state, const core::Secondsd& stam
 
   // odometry msg
   nav_msgs::msg::Odometry odom_msg;
-  odom_msg.header.stamp = rclcpp::Time(std::chrono::duration_cast<std::chrono::nanoseconds>(stamp).count());
+  const rclcpp::Time msg_stamp(std::chrono::duration_cast<std::chrono::nanoseconds>(stamp).count());
+  odom_msg.header.stamp = msg_stamp;
   odom_msg.header.frame_id = to_frame;
   odom_msg.child_frame_id = from_frame;
   odom_msg.pose.pose = utils::sophus_to_pose(state.pose);
   utils::eigen_vector3d_to_ros_xyz(state.velocity, odom_msg.twist.twist.linear);
   utils::eigen_vector3d_to_ros_xyz(state.angular_velocity, odom_msg.twist.twist.angular);
+
+  // Publish clock BEFORE odometry message to ensure clock is set when subscribers receive odom
+  // This ensures the clock matches the timestamps of published messages
+  if (clock_publisher) {
+    rosgraph_msgs::msg::Clock clock_msg;
+    clock_msg.clock = msg_stamp;
+    clock_publisher->publish(clock_msg);
+    RCLCPP_DEBUG_STREAM(node->get_logger(),
+                        "Published /clock: " << msg_stamp.nanoseconds() << " ns with odometry timestamp");
+  }
+
   odom_publisher->publish(odom_msg);
 }
 
