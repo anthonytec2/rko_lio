@@ -291,6 +291,7 @@ void Node::lidar_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& l
   }
 }
 
+
 void Node::registration_loop() {
   while (rclcpp::ok() && atomic_node_running) {
     SCOPED_PROFILER("ROS Registration Loop");
@@ -345,11 +346,12 @@ void Node::registration_loop() {
             // Replicate the input field layout with native types:
             // x(f32), y(f32), z(f32), time(f64), reflectivity(u8), signal(u16), near_ir(u16)
             sensor_msgs::PointCloud2Modifier modifier(deskewed_msg);
+            // All fields are FLOAT32 for homogeneous layout (enables fast aligned numpy reads)
             modifier.setPointCloud2Fields(
-                7, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1, sensor_msgs::msg::PointField::FLOAT32, "z",
-                1, sensor_msgs::msg::PointField::FLOAT32, "time", 1, sensor_msgs::msg::PointField::FLOAT64,
-                "reflectivity", 1, sensor_msgs::msg::PointField::UINT8, "signal", 1,
-                sensor_msgs::msg::PointField::UINT16, "near_ir", 1, sensor_msgs::msg::PointField::UINT16);
+                6, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1, sensor_msgs::msg::PointField::FLOAT32, "z",
+                1, sensor_msgs::msg::PointField::FLOAT32, "reflectivity", 1,
+                sensor_msgs::msg::PointField::FLOAT32, "signal", 1, sensor_msgs::msg::PointField::FLOAT32, "near_ir",
+                1, sensor_msgs::msg::PointField::FLOAT32);
             modifier.resize(point_count);
 
             const auto has_field = [&](const std::string& name) {
@@ -360,7 +362,6 @@ void Node::registration_loop() {
             const bool has_refl = has_field("reflectivity");
             const bool has_sig = has_field("signal");
             const bool has_nir = has_field("near_ir");
-            const bool has_time = has_field("time");
 
             if (!has_refl)
               RCLCPP_WARN_STREAM_ONCE(node->get_logger(), "Input cloud missing 'reflectivity'. Filling zeros.");
@@ -373,38 +374,32 @@ void Node::registration_loop() {
             std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint8_t>> in_refl;
             std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint16_t>> in_sig;
             std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint16_t>> in_nir;
-            std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<double>> in_time;
             if (has_refl)
               in_refl = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint8_t>>(*lidar_msg, "reflectivity");
             if (has_sig)
               in_sig = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint16_t>>(*lidar_msg, "signal");
             if (has_nir)
               in_nir = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint16_t>>(*lidar_msg, "near_ir");
-            if (has_time)
-              in_time = std::make_unique<sensor_msgs::PointCloud2ConstIterator<double>>(*lidar_msg, "time");
 
-            // Output iterators with matching native types
+            // Output iterators – all float32 for homogeneous layout (fast numpy reads)
             sensor_msgs::PointCloud2Iterator<float> out_x(deskewed_msg, "x");
             sensor_msgs::PointCloud2Iterator<float> out_y(deskewed_msg, "y");
             sensor_msgs::PointCloud2Iterator<float> out_z(deskewed_msg, "z");
-            sensor_msgs::PointCloud2Iterator<double> out_time(deskewed_msg, "time");
-            sensor_msgs::PointCloud2Iterator<uint8_t> out_refl(deskewed_msg, "reflectivity");
-            sensor_msgs::PointCloud2Iterator<uint16_t> out_sig(deskewed_msg, "signal");
-            sensor_msgs::PointCloud2Iterator<uint16_t> out_nir(deskewed_msg, "near_ir");
+            sensor_msgs::PointCloud2Iterator<float> out_refl(deskewed_msg, "reflectivity");
+            sensor_msgs::PointCloud2Iterator<float> out_sig(deskewed_msg, "signal");
+            sensor_msgs::PointCloud2Iterator<float> out_nir(deskewed_msg, "near_ir");
 
             for (size_t i = 0; i < point_count;
-                 ++i, ++out_x, ++out_y, ++out_z, ++out_time, ++out_refl, ++out_sig, ++out_nir) {
+                 ++i, ++out_x, ++out_y, ++out_z, ++out_refl, ++out_sig, ++out_nir) {
               const Eigen::Vector3d p_lidar = base_to_lidar * lio->last_deskewed_scan[i];
               *out_x = static_cast<float>(p_lidar.x());
               *out_y = static_cast<float>(p_lidar.y());
               *out_z = static_cast<float>(p_lidar.z());
 
-              *out_time = in_time ? **in_time : 0.0;
-              *out_refl = in_refl ? **in_refl : static_cast<uint8_t>(0);
-              *out_sig = in_sig ? **in_sig : static_cast<uint16_t>(0);
-              *out_nir = in_nir ? **in_nir : static_cast<uint16_t>(0);
+              *out_refl = in_refl ? static_cast<float>(**in_refl) : 0.0f;
+              *out_sig = in_sig ? static_cast<float>(**in_sig) : 0.0f;
+              *out_nir = in_nir ? static_cast<float>(**in_nir) : 0.0f;
 
-              if (in_time) ++(*in_time);
               if (in_refl) ++(*in_refl);
               if (in_sig) ++(*in_sig);
               if (in_nir) ++(*in_nir);
