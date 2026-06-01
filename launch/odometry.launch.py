@@ -231,15 +231,16 @@ configurable_parameters = [
     },
     # seq-pipeline-specific parameters (online with odom_at_imu_rate:=true)
     {
-        "name": "seq.odom_at_imu_rate_topic",
+        "name": "odom_at_imu_rate_topic",
         "default": "rko_lio/odom_at_imu_rate",
-        "description": "[online seq only] Topic for IMU-rate odometry. Used when odom_at_imu_rate:=true.",
+        "description": "Topic for IMU-rate odometry. Used whenever odom_at_imu_rate:=true.",
     },
     {
         "name": "seq.tf_at_imu_rate",
         "default": "false",
         "type": "bool",
-        "description": "[online seq only] Publish base->odom TF at IMU rate instead of LiDAR rate. Used when odom_at_imu_rate:=true.",
+        "description": "[online seq only] Publish base->odom TF at IMU rate (in addition to the LiDAR-rate TF). Only
+  meaningful when mode:=online and odom_at_imu_rate:=true.",
     },
     # ros params
     {
@@ -251,7 +252,9 @@ configurable_parameters = [
         "name": "odom_at_imu_rate",
         "default": "false",
         "type": "bool",
-        "description": "When true (and mode:=online), launch the sequential variant which additionally publishes IMU-rate odometry on seq.odom_at_imu_rate_topic. Has no effect when mode:=offline.",
+        "description": "Publish IMU-rate odometry on odom_at_imu_rate_topic. In online mode this also selects the sequential
+   OnlineImuRateNode (streaming, per-IMU publish). In offline mode the OfflineNode batch-publishes from inside the
+  IMU-integration loop instead. Per-message header.stamp is the original IMU sample time in both cases.",
     },
     {
         "name": "config_file",
