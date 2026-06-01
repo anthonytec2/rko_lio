@@ -112,6 +112,15 @@ void ThreadedNode::registration_loop() {
     for (; !imu_buffer.empty() && imu_buffer.front().time < end_stamp; imu_buffer.pop()) {
       const core::ImuControl& imu_data = imu_buffer.front();
       lio->add_imu_measurement(extrinsic_imu2base, imu_data);
+      // If IMU-rate odometry was requested, publish the freshly-integrated imu_state for this
+      // IMU sample. Skip while imu_state hasn't been seeded yet (pre-first-registration).
+      // For ThreadedNode-based pipelines the publish is batched (all imu samples since the last
+      // lidar scan get published in a burst right before the next registration), but the
+      // header.stamp on each message reflects the original IMU sample time — so a downstream
+      // timestamp-keyed join (e.g. h5 indexing) sees the same data as the streaming variant.
+      if (odom_at_imu_rate_publisher && lio->imu_state.time > core::Nsec{0}) {
+        publish_odometry(lio->imu_state, odom_at_imu_rate_publisher);
+      }
     }
     // check if there are more messages buffered already
     atomic_can_process =

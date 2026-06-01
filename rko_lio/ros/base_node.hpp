@@ -88,6 +88,14 @@ public:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_publisher;
   rclcpp::Publisher<geometry_msgs::msg::AccelStamped>::SharedPtr lidar_accel_publisher;
 
+  // IMU-rate odometry publisher. Created when `odom_at_imu_rate` is true.
+  // - OnlineImuRateNode publishes from its inline imu_callback (true streaming).
+  // - ThreadedNode-based pipelines (offline / async online) publish from inside the IMU-integration
+  //   batch loop in registration_loop, producing the same h5-equivalent samples after timestamp join.
+  std::string odom_at_imu_rate_topic = "rko_lio/odom_at_imu_rate";
+  bool publish_odom_at_imu_rate = false;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_at_imu_rate_publisher;
+
   // map publish thread
   std::jthread map_publish_thead;
   core::Nsec publish_map_after = std::chrono::seconds(1);

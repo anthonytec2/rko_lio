@@ -98,6 +98,16 @@ BaseNode::BaseNode(const std::string& node_name, const rclcpp::NodeOptions& opti
     frame_publisher = node->create_publisher<sensor_msgs::msg::PointCloud2>(deskewed_scan_topic, publisher_qos);
   }
 
+  // IMU-rate odometry publisher (shared by OnlineImuRateNode and ThreadedNode-derived pipelines).
+  // Gated by `odom_at_imu_rate`; topic name is configurable via `odom_at_imu_rate_topic`.
+  publish_odom_at_imu_rate = node->declare_parameter<bool>("odom_at_imu_rate", publish_odom_at_imu_rate);
+  if (publish_odom_at_imu_rate) {
+    odom_at_imu_rate_topic =
+        node->declare_parameter<std::string>("odom_at_imu_rate_topic", odom_at_imu_rate_topic);
+    odom_at_imu_rate_publisher =
+        node->create_publisher<nav_msgs::msg::Odometry>(odom_at_imu_rate_topic, publisher_qos);
+  }
+
   publish_local_map = node->declare_parameter<bool>("publish_local_map", publish_local_map);
   if (publish_local_map) {
     map_topic = node->declare_parameter<std::string>("map_topic", map_topic);

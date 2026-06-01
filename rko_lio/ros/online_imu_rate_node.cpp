@@ -39,14 +39,24 @@ namespace rko_lio::ros {
 // the rclcpp executor thread. The IMU callback feeds add_imu_measurement and
 // publishes IMU-rate odometry; the LiDAR callback runs register_scan inline
 // and publishes the lidar-rate odometry, deskewed scan, and TF (by default).
+// Force `odom_at_imu_rate` on for this node specifically by injecting a parameter override.
+// BaseNode reads that flag in its constructor and creates `odom_at_imu_rate_publisher` accordingly.
+static rclcpp::NodeOptions force_imu_rate_on(const rclcpp::NodeOptions& options) {
+  auto merged = options;
+  auto overrides = merged.parameter_overrides();
+  overrides.emplace_back("odom_at_imu_rate", true);
+  merged.parameter_overrides(overrides);
+  return merged;
+}
+
 class OnlineImuRateNode : public BaseNode {
 public:
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_at_imu_rate_publisher;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub;
   core::Timer timer;
 
-  std::string odom_at_imu_rate_topic = "rko_lio/odom_at_imu_rate";
+  // Streaming-only TF behaviour: optionally republish the odom->base TF at every IMU sample
+  // (in addition to the LiDAR-rate TF). Defaults to off because flooding /tf is rarely useful.
   bool tf_at_imu_rate = false;
 
   OnlineImuRateNode(const OnlineImuRateNode&) = delete;
@@ -55,13 +65,9 @@ public:
   OnlineImuRateNode& operator=(OnlineImuRateNode&&) = delete;
 
   explicit OnlineImuRateNode(const rclcpp::NodeOptions& options)
-      : BaseNode("rko_lio_online_imu_rate_node", options), timer("RKO LIO Online IMU-rate Node") {
-    odom_at_imu_rate_topic = node->declare_parameter<std::string>("seq.odom_at_imu_rate_topic", odom_at_imu_rate_topic);
+      : BaseNode("rko_lio_online_imu_rate_node", force_imu_rate_on(options)),
+        timer("RKO LIO Online IMU-rate Node") {
     tf_at_imu_rate = node->declare_parameter<bool>("seq.tf_at_imu_rate", tf_at_imu_rate);
-
-    const rclcpp::QoS publisher_qos((rclcpp::SystemDefaultsQoS().keep_last(1).durability_volatile()));
-    odom_at_imu_rate_publisher =
-        node->create_publisher<nav_msgs::msg::Odometry>(odom_at_imu_rate_topic, publisher_qos);
 
     RCLCPP_INFO_STREAM(node->get_logger(),
                        "OnlineImuRateNode publishing IMU-rate odometry to "
