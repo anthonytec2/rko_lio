@@ -50,6 +50,10 @@ public:
   std::atomic<bool> registration_busy{false};
   std::queue<core::ImuControl> imu_buffer;
   std::queue<LidarFrame> lidar_buffer;
+  // Parallel buffer of the original lidar messages, only populated when publish_deskewed_scan is
+  // enabled. Used by the registration thread to publish a full-resolution deskewed cloud with the
+  // input's optional channels (reflectivity / signal / near_ir) carried through.
+  std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> lidar_msg_buffer;
   size_t max_lidar_buffer_size = 50;
 
   ThreadedNode() = delete;

@@ -114,7 +114,14 @@ public:
 
   core::Vector3dVector register_scan_locked(const core::Vector3dVector& scan, const core::TimestampVector& time_vector);
 
-  void publish_lidar_outputs(const core::Vector3dVector& deskewed_frame) const;
+  // If `input_lidar_msg` is provided and its point count matches `lio->last_deskewed_scan`, the
+  // deskewed cloud is published at full input resolution with optional reflectivity / signal /
+  // near_ir channels carried through from the input (all FLOAT32 for aligned numpy reads).
+  // Otherwise it falls back to publishing the passed-in (voxel-filtered) `deskewed_frame` as plain
+  // xyz, which is the upstream behaviour.
+  void publish_lidar_outputs(
+      const core::Vector3dVector& deskewed_frame,
+      const sensor_msgs::msg::PointCloud2::ConstSharedPtr& input_lidar_msg = nullptr) const;
 
   void publish_odometry(const core::State& state,
                         const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr& publisher) const;

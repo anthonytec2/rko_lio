@@ -26,9 +26,12 @@
 #include "rko_lio/core/process_timestamps.hpp"
 #include "rko_lio/ros/utils/utils.hpp"
 // other
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <stdexcept>
 
 namespace {
@@ -251,12 +254,111 @@ core::Vector3dVector BaseNode::register_scan_locked(const core::Vector3dVector& 
   return lio->register_scan(extrinsic_lidar2base, scan, time_vector);
 }
 
-void BaseNode::publish_lidar_outputs(const core::Vector3dVector& deskewed_frame) const {
+void BaseNode::publish_lidar_outputs(
+    const core::Vector3dVector& deskewed_frame,
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr& input_lidar_msg) const {
   if (publish_deskewed_scan) {
-    std_msgs::msg::Header header;
-    header.frame_id = lidar_frame;
-    header.stamp = utils::to_ros_time(lio->lidar_state.time);
-    frame_publisher->publish(utils::eigen_to_point_cloud2(deskewed_frame, header));
+    const size_t input_point_count = input_lidar_msg
+        ? static_cast<size_t>(input_lidar_msg->height) * static_cast<size_t>(input_lidar_msg->width)
+        : 0;
+    const bool can_publish_full_res =
+        input_lidar_msg != nullptr && lio->last_deskewed_scan.size() == input_point_count;
+
+    if (can_publish_full_res) {
+      // Full-resolution deskewed cloud with optional reflectivity / signal / near_ir channels
+      // carried through from the input. All output fields are FLOAT32 for an aligned, homogeneous
+      // numpy-friendly layout. last_deskewed_scan is in the base frame; transform each point back
+      // to the lidar frame so the published cloud matches the input header's frame.
+      const Sophus::SE3d base_to_lidar = extrinsic_lidar2base.inverse();
+      sensor_msgs::msg::PointCloud2 deskewed_msg;
+      deskewed_msg.header.frame_id =
+          input_lidar_msg->header.frame_id.empty() ? lidar_frame : input_lidar_msg->header.frame_id;
+      deskewed_msg.header.stamp = utils::to_ros_time(lio->lidar_state.time);
+      deskewed_msg.height = input_lidar_msg->height;
+      deskewed_msg.width = input_lidar_msg->width;
+      deskewed_msg.is_bigendian = input_lidar_msg->is_bigendian;
+      deskewed_msg.is_dense = input_lidar_msg->is_dense;
+
+      sensor_msgs::PointCloud2Modifier modifier(deskewed_msg);
+      modifier.setPointCloud2Fields(
+          6, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1, sensor_msgs::msg::PointField::FLOAT32, "z",
+          1, sensor_msgs::msg::PointField::FLOAT32, "reflectivity", 1, sensor_msgs::msg::PointField::FLOAT32,
+          "signal", 1, sensor_msgs::msg::PointField::FLOAT32, "near_ir", 1, sensor_msgs::msg::PointField::FLOAT32);
+      modifier.resize(input_point_count);
+
+      const auto has_field = [&](const std::string& name) {
+        return std::any_of(input_lidar_msg->fields.cbegin(), input_lidar_msg->fields.cend(),
+                           [&](const auto& f) { return f.name == name; });
+      };
+
+      const bool has_refl = has_field("reflectivity");
+      const bool has_sig = has_field("signal");
+      const bool has_nir = has_field("near_ir");
+
+      if (!has_refl) {
+        RCLCPP_WARN_STREAM_ONCE(node->get_logger(), "Input cloud missing 'reflectivity'. Filling zeros.");
+      }
+      if (!has_sig) {
+        RCLCPP_WARN_STREAM_ONCE(node->get_logger(), "Input cloud missing 'signal'. Filling zeros.");
+      }
+      if (!has_nir) {
+        RCLCPP_WARN_STREAM_ONCE(node->get_logger(), "Input cloud missing 'near_ir'. Filling zeros.");
+      }
+
+      // Input iterators read each channel with its native datatype (Ouster: u8 reflectivity, u16
+      // signal, u16 near_ir). Output iterators always write float32.
+      std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint8_t>> in_refl;
+      std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint16_t>> in_sig;
+      std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint16_t>> in_nir;
+      if (has_refl) {
+        in_refl = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint8_t>>(*input_lidar_msg, "reflectivity");
+      }
+      if (has_sig) {
+        in_sig = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint16_t>>(*input_lidar_msg, "signal");
+      }
+      if (has_nir) {
+        in_nir = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint16_t>>(*input_lidar_msg, "near_ir");
+      }
+
+      sensor_msgs::PointCloud2Iterator<float> out_x(deskewed_msg, "x");
+      sensor_msgs::PointCloud2Iterator<float> out_y(deskewed_msg, "y");
+      sensor_msgs::PointCloud2Iterator<float> out_z(deskewed_msg, "z");
+      sensor_msgs::PointCloud2Iterator<float> out_refl(deskewed_msg, "reflectivity");
+      sensor_msgs::PointCloud2Iterator<float> out_sig(deskewed_msg, "signal");
+      sensor_msgs::PointCloud2Iterator<float> out_nir(deskewed_msg, "near_ir");
+
+      for (size_t i = 0; i < input_point_count;
+           ++i, ++out_x, ++out_y, ++out_z, ++out_refl, ++out_sig, ++out_nir) {
+        const Eigen::Vector3d p_lidar = base_to_lidar * lio->last_deskewed_scan[i];
+        *out_x = static_cast<float>(p_lidar.x());
+        *out_y = static_cast<float>(p_lidar.y());
+        *out_z = static_cast<float>(p_lidar.z());
+
+        *out_refl = in_refl ? static_cast<float>(**in_refl) : 0.0f;
+        *out_sig = in_sig ? static_cast<float>(**in_sig) : 0.0f;
+        *out_nir = in_nir ? static_cast<float>(**in_nir) : 0.0f;
+
+        if (in_refl) ++(*in_refl);
+        if (in_sig) ++(*in_sig);
+        if (in_nir) ++(*in_nir);
+      }
+
+      frame_publisher->publish(deskewed_msg);
+    } else {
+      // No input msg available, or size mismatch (would mean process_lidar_msg filtered points).
+      // Fall back to the upstream behaviour: publish the voxel-filtered xyz-only deskewed_frame.
+      if (input_lidar_msg != nullptr && lio->last_deskewed_scan.size() != input_point_count) {
+        RCLCPP_WARN_STREAM(
+            node->get_logger(),
+            "Size mismatch between last_deskewed_scan (" << lio->last_deskewed_scan.size() << ") and input cloud ("
+                                                         << input_point_count
+                                                         << "). Publishing filtered cloud without channels.");
+      }
+      std_msgs::msg::Header header;
+      header.frame_id = lidar_frame;
+      header.stamp = utils::to_ros_time(lio->lidar_state.time);
+      frame_publisher->publish(utils::eigen_to_point_cloud2(deskewed_frame, header));
+    }
   }
   publish_odometry(lio->lidar_state, odom_publisher);
   if (publish_lidar_acceleration) {

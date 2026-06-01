@@ -72,6 +72,12 @@ void ThreadedNode::lidar_callback(const sensor_msgs::msg::PointCloud2::ConstShar
     {
       std::lock_guard lock(buffer_mutex);
       lidar_buffer.emplace(timestamps, scan);
+      // Keep the original message alongside, so the registration thread can republish the deskewed
+      // cloud at full resolution with the input's optional channels. Only buffered when
+      // publish_deskewed_scan is on; otherwise we'd just be holding onto memory for nothing.
+      if (publish_deskewed_scan) {
+        lidar_msg_buffer.push(lidar_msg);
+      }
       atomic_can_process = !imu_buffer.empty() && imu_buffer.back().time > lidar_buffer.front().timestamps.max;
     }
     if (atomic_can_process) {
@@ -93,6 +99,13 @@ void ThreadedNode::registration_loop() {
     }
     LidarFrame frame = std::move(lidar_buffer.front());
     lidar_buffer.pop();
+    // Pop the matching input message if we're buffering them. The two queues are kept in lockstep
+    // by lidar_callback so this pop is guaranteed to give us the message that produced `frame`.
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr input_lidar_msg = nullptr;
+    if (publish_deskewed_scan && !lidar_msg_buffer.empty()) {
+      input_lidar_msg = lidar_msg_buffer.front();
+      lidar_msg_buffer.pop();
+    }
     registration_busy = true;
     const auto& [timestamps, scan] = frame;
     const auto& [start_stamp, end_stamp, time_vector] = timestamps;
@@ -109,7 +122,7 @@ void ThreadedNode::registration_loop() {
       const core::Vector3dVector deskewed_frame = register_scan_locked(scan, time_vector);
       if (!deskewed_frame.empty()) {
         // TODO: first frame is skipped and an empty frame is returned. improve how we handle this
-        publish_lidar_outputs(deskewed_frame);
+        publish_lidar_outputs(deskewed_frame, input_lidar_msg);
         publish_tf(lio->lidar_state);
       }
     } catch (const std::invalid_argument& ex) {

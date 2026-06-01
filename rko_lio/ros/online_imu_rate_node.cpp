@@ -114,7 +114,7 @@ public:
         // first frame is skipped and an empty frame is returned. nothing to publish.
         return;
       }
-      publish_lidar_outputs(deskewed_frame);
+      publish_lidar_outputs(deskewed_frame, lidar_msg);
       publish_tf(lio->lidar_state);
     } catch (const std::invalid_argument& ex) {
       RCLCPP_ERROR_STREAM(node->get_logger(), "Encountered error, dropping frame. Error: " << ex.what());

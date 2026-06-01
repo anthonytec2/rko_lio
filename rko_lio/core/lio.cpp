@@ -288,6 +288,9 @@ void LIO::initialize(const Nsec lidar_time) {
 Vector3dVector LIO::bootstrap_first_scan(const Vector3dVector& scan, const Nsec current_lidar_time) {
   lidar_state.time = current_lidar_time;
   imu_state = lidar_state;
+  // No deskewing on the first frame; expose the raw scan as the "deskewed" full-resolution scan
+  // so ROS wrappers can publish it consistently.
+  last_deskewed_scan = scan;
   auto preproc = preprocess_scan(scan, config);
   if (!config.initialization_phase) {
     map.update(config.double_downsample ? preproc.map_frame : preproc.keypoints, lidar_state.pose);
@@ -451,9 +454,11 @@ Vector3dVector LIO::register_scan(const Vector3dVector& scan, const TimestampVec
   mean_body_acceleration = kf_step.updated.mean;
   body_acceleration_covariance = kf_step.updated.covariance;
 
-  auto preproc_result =
-      config.deskew ? preprocess_scan(deskew_scan(scan, timestamps, current_lidar_time, relative_pose_at_time), config)
-                    : preprocess_scan(scan, config);
+  // Build the full-resolution deskewed scan once and stash it for external (ROS) consumers, then
+  // hand the same buffer to preprocess_scan for the regular pipeline. Avoids deskewing twice.
+  last_deskewed_scan =
+      config.deskew ? deskew_scan(scan, timestamps, current_lidar_time, relative_pose_at_time) : scan;
+  auto preproc_result = preprocess_scan(last_deskewed_scan, config);
 
   if (preproc_result.keypoints.size() < 10) {
     const std::string error_msg =
