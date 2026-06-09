@@ -239,8 +239,7 @@ configurable_parameters = [
         "name": "seq.tf_at_imu_rate",
         "default": "false",
         "type": "bool",
-        "description": "[online seq only] Publish base->odom TF at IMU rate (in addition to the LiDAR-rate TF). Only
-  meaningful when mode:=online and odom_at_imu_rate:=true.",
+        "description": "[online seq only] Publish base->odom TF at IMU rate (in addition to the LiDAR-rate TF). Only meaningful when mode:=online and odom_at_imu_rate:=true.",
     },
     # ros params
     {
@@ -252,9 +251,7 @@ configurable_parameters = [
         "name": "odom_at_imu_rate",
         "default": "false",
         "type": "bool",
-        "description": "Publish IMU-rate odometry on odom_at_imu_rate_topic. In online mode this also selects the sequential
-   OnlineImuRateNode (streaming, per-IMU publish). In offline mode the OfflineNode batch-publishes from inside the
-  IMU-integration loop instead. Per-message header.stamp is the original IMU sample time in both cases.",
+        "description": "Publish IMU-rate odometry on odom_at_imu_rate_topic. In online mode this also selects the sequential OnlineImuRateNode (streaming, per-IMU publish). In offline mode the OfflineNode batch-publishes from inside the IMU-integration loop instead. Per-message header.stamp is the original IMU sample time in both cases.",
     },
     {
         "name": "config_file",
